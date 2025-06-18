@@ -152,7 +152,7 @@ static void free_request_struct (struct request_s *request)
  * Take a host string and if there is a username/password part, strip
  * it off.
  */
-static void strip_username_password (char *host)
+static void __attribute__((unused)) strip_username_password (char *host)
 {
         char *p;
 
@@ -187,8 +187,10 @@ static int sandbox_strip_username_password(char *input, char *output, size_t out
 
     if (pid == 0) {
         /* Child process */ 
-        close(pipefd[0]);
         char buf[1024];
+        ssize_t written;
+        close(pipefd[0]);
+        
 
         /* Check to see if sandbox is working */ 
         if (!input || strlen(input) == 0) {
@@ -211,27 +213,31 @@ static int sandbox_strip_username_password(char *input, char *output, size_t out
         if (strcmp(input, "TRIGGER_CRASH") == 0)
                 *((char *)0) = 'X';
 
+        {
+                char *p = strchr(buf, '@');
+                if (p != NULL) {
+                char *q = buf;
+                p++;
+                while (*p)
+                        *q++ = *p++;
+                *q = '\0';
+                }
+        }       
         
-        char *p = strchr(buf, '@');
-        if (p != NULL) {
-            char *q = buf;
-            p++;
-            while (*p)
-                *q++ = *p++;
-            *q = '\0';
-        }
-
         fprintf(stderr, "[SANDBOX] Stripped output: %s\n", buf);
         fflush(stderr);
 
-        (void) write(pipefd[1], buf, strlen(buf) + 1);
+        written = write(pipefd[1], buf, strlen(buf) + 1);
+        if (written == -1) {
+            perror("write failed");
+            _exit(1);
+        }
         close(pipefd[1]);
         _exit(0);
     } else {
-        
-        close(pipefd[1]);
         int status;
         ssize_t n;
+        close(pipefd[1]);
 
         waitpid(pid, &status, 0);
         if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
@@ -285,6 +291,8 @@ static int extract_url (const char *url, int default_port,
         char *p;
         int port;
 
+        char sanitized[1024];
+
         /* Full URL Passed */
         /* fprintf(stderr, "[DEBUG] Full URL passed in: %s\n", url);
         fflush(stderr);
@@ -312,7 +320,6 @@ static int extract_url (const char *url, int default_port,
         /* Remove the username/password if they're present */
         /* strip_username_password (request->host); */
         
-        char sanitized[1024];
         if (sandbox_strip_username_password(request->host, sanitized, sizeof(sanitized)) == 0) {
         safefree(request->host);
         request->host = safestrdup(sanitized);
