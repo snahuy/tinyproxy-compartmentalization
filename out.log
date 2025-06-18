@@ -1,0 +1,14 @@
+NOTICE    Jun 17 14:23:11.427 [44496]: Initializing tinyproxy ...
+NOTICE    Jun 17 14:23:11.429 [44496]: Reloading config file (etc/tinyproxy.conf)
+INFO      Jun 17 14:23:11.431 [44496]: Setting "Via" header to 'tinyproxy'
+NOTICE    Jun 17 14:23:11.432 [44496]: Reloading config file finished
+INFO      Jun 17 14:23:11.434 [44496]: listen_sock called with addr = '(NULL)'
+INFO      Jun 17 14:23:11.435 [44496]: trying to listen on host[0.0.0.0], family[2], socktype[1], proto[6]
+INFO      Jun 17 14:23:11.437 [44496]: listening on fd [3]
+INFO      Jun 17 14:23:11.438 [44496]: trying to listen on host[::], family[10], socktype[1], proto[6]
+INFO      Jun 17 14:23:11.440 [44496]: listening on fd [4]
+INFO      Jun 17 14:23:11.441 [44496]: Not running as root, so not changing UID/GID.
+INFO      Jun 17 14:23:11.443 [44496]: Setting the various signals.
+INFO      Jun 17 14:23:11.444 [44496]: Starting main loop. Accepting connections.
+NOTICE    Jun 17 14:23:17.250 [44496]: Shutting down.
+INFO      Jun 17 14:23:17.252 [44496]: trying to bring down 0 threads...

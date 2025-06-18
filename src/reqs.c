@@ -53,6 +53,12 @@
 #include "loop.h"
 #include "mypoll.h"
 
+#include <unistd.h>
+#include <sys/wait.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+
 /*
  * Maximum length of a HTTP line
  */
@@ -166,6 +172,81 @@ static void strip_username_password (char *host)
         *host = '\0';
 }
 
+/* Sandbox Strip User Name Password*/
+static int sandbox_strip_username_password(char *input, char *output, size_t output_size)
+{
+    int pipefd[2];
+    pid_t pid;
+
+    if (pipe(pipefd) == -1)
+        return -1;
+
+    pid = fork();
+    if (pid < 0)
+        return -1;
+
+    if (pid == 0) {
+        /* Child process */ 
+        close(pipefd[0]);
+        char buf[1024];
+
+        /* Check to see if sandbox is working */ 
+        if (!input || strlen(input) == 0) {
+                fprintf(stderr, "[SANDBOX] Invalid input: NULL or empty\n");
+                fflush(stderr);
+                _exit(1); 
+        }
+
+        fprintf(stderr, "[SANDBOX] Original input: %s\n", input);
+        fflush(stderr);
+
+        if (!input || strlen(input) == 0) {
+            _exit(1); 
+        }
+
+        strlcpy(buf, input, sizeof(buf));
+        buf[sizeof(buf) - 1] = '\0';
+
+        
+        if (strcmp(input, "TRIGGER_CRASH") == 0)
+                *((char *)0) = 'X';
+
+        
+        char *p = strchr(buf, '@');
+        if (p != NULL) {
+            char *q = buf;
+            p++;
+            while (*p)
+                *q++ = *p++;
+            *q = '\0';
+        }
+
+        fprintf(stderr, "[SANDBOX] Stripped output: %s\n", buf);
+        fflush(stderr);
+
+        (void) write(pipefd[1], buf, strlen(buf) + 1);
+        close(pipefd[1]);
+        _exit(0);
+    } else {
+        
+        close(pipefd[1]);
+        int status;
+        ssize_t n;
+
+        waitpid(pid, &status, 0);
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+            return -1;
+
+        n = read(pipefd[0], output, output_size - 1);
+        close(pipefd[0]);
+        if (n <= 0)
+            return -1;
+
+        output[n] = '\0';
+        return 0;
+    }
+}
+
 /*
  * Take a host string and if there is a port part, strip
  * it off and set proper port variable i.e. for www.host.com:8001
@@ -204,6 +285,13 @@ static int extract_url (const char *url, int default_port,
         char *p;
         int port;
 
+        /* Full URL Passed */
+        /* fprintf(stderr, "[DEBUG] Full URL passed in: %s\n", url);
+        fflush(stderr);
+        fprintf(stderr, "[DEBUG] Full Default Port passed in: %s\n", default_port);
+        fflush(stderr);
+        */
+
         /* Split the URL on the slash to separate host from path */
         p = strchr (url, '/');
         if (p != NULL) {
@@ -222,7 +310,18 @@ static int extract_url (const char *url, int default_port,
                 goto ERROR_EXIT;
 
         /* Remove the username/password if they're present */
-        strip_username_password (request->host);
+        /* strip_username_password (request->host); */
+        
+        char sanitized[1024];
+        if (sandbox_strip_username_password(request->host, sanitized, sizeof(sanitized)) == 0) {
+        safefree(request->host);
+        request->host = safestrdup(sanitized);
+        if (!request->host)
+                goto ERROR_EXIT;
+        } else {
+        fprintf(stderr, "[ERROR] Failed to sanitize host\n");
+        goto ERROR_EXIT;
+        }
 
         /* Find a proper port in www.site.com:8001 URLs */
         port = strip_return_port (request->host);
