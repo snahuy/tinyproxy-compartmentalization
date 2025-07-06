@@ -175,21 +175,23 @@ static void __attribute__((unused)) strip_username_password (char *host)
 /* Sandbox Strip User Name Password*/
 static int sandbox_strip_username_password(char *input, char *output, size_t output_size)
 {
+    /* Create a pipe for inter-process communication*/
     int pipefd[2];
     pid_t pid;
 
     if (pipe(pipefd) == -1)
         return -1;
-
+    
+    /* Creates a child process*/
     pid = fork();
     if (pid < 0)
         return -1;
 
     if (pid == 0) {
         /* Child process */ 
-        char buf[1024];
+        char buf[1024]; 
         ssize_t written;
-        close(pipefd[0]);
+        close(pipefd[0]); /* Close read ends becase we only need to write*/
         
 
         /* Check to see if sandbox is working */ 
@@ -198,9 +200,6 @@ static int sandbox_strip_username_password(char *input, char *output, size_t out
                 fflush(stderr);
                 _exit(1); 
         }
-
-        fprintf(stderr, "[SANDBOX] Original input: %s\n", input);
-        fflush(stderr);
 
         if (!input || strlen(input) == 0) {
             _exit(1); 
@@ -212,7 +211,7 @@ static int sandbox_strip_username_password(char *input, char *output, size_t out
         
         if (strcmp(input, "TRIGGER_CRASH") == 0)
                 *((char *)0) = 'X';
-
+        /* Stripping the credential logs */
         {
                 char *p = strchr(buf, '@');
                 if (p != NULL) {
@@ -223,10 +222,8 @@ static int sandbox_strip_username_password(char *input, char *output, size_t out
                 *q = '\0';
                 }
         }       
-        
-        fprintf(stderr, "[SANDBOX] Stripped output: %s\n", buf);
-        fflush(stderr);
 
+        /* Send it back to the parent via the pipe */
         written = write(pipefd[1], buf, strlen(buf) + 1);
         if (written == -1) {
             perror("write failed");
@@ -234,20 +231,24 @@ static int sandbox_strip_username_password(char *input, char *output, size_t out
         }
         close(pipefd[1]);
         _exit(0);
+
     } else {
         int status;
         ssize_t n;
-        close(pipefd[1]);
 
-        waitpid(pid, &status, 0);
+        close(pipefd[1]); /* Close the write end of the pipe*/
+
+        waitpid(pid, &status, 0); /* Waits for child process to finish */
+        /* Check if child process exit cleanly */
         if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
             return -1;
 
+        /* Read and sanitzed string into output */
         n = read(pipefd[0], output, output_size - 1);
         close(pipefd[0]);
         if (n <= 0)
             return -1;
-
+        
         output[n] = '\0';
         return 0;
     }
@@ -257,7 +258,7 @@ static int sandbox_strip_username_password(char *input, char *output, size_t out
  * Take a host string and if there is a port part, strip
  * it off and set proper port variable i.e. for www.host.com:8001
  */
-static int strip_return_port (char *host)
+static int __attribute__((unused)) strip_return_port (char *host)
 {
         char *ptr1;
         char *ptr2;
@@ -278,6 +279,105 @@ static int strip_return_port (char *host)
         return port;
 }
 
+
+static int sandbox_strip_return_port(char *input, char *output_host, size_t output_size, int *port_out) 
+{
+    int pipefd[2];
+    pid_t pid;
+
+    if (pipe(pipefd) == -1)
+        return -1;
+
+    pid = fork();
+    if (pid < 0)
+        return -1;
+
+    if (pid == 0) {
+        char buf[1024];
+        char *ptr1, *ptr2;
+        int port = 0;
+        char message[32];
+        ssize_t written;
+
+        close(pipefd[0]);
+
+        strncpy(buf, input, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = '\0';
+
+        ptr2 = strchr(buf, ']');
+        if (ptr2 != NULL) {
+            /*fprintf(stderr, "[PORT STRIP] IPv6 address not supported: '%s'\n", buf); */
+            _exit(1);
+        }
+
+        ptr1 = strrchr(buf, ':');
+        if (ptr1 == NULL) {
+            /* fprintf(stderr, "[PORT STRIP] No port in input. Returning host='%s'\n", buf); */
+            snprintf(message, sizeof(message), "%d\n", 0);
+            write(pipefd[1], message, strlen(message));
+            write(pipefd[1], buf, strlen(buf));
+            close(pipefd[1]);
+            _exit(0);
+        }
+
+        *ptr1++ = '\0'; 
+        if (sscanf(ptr1, "%d", &port) != 1) {
+            /* fprintf(stderr, "[PORT STRIP] Invalid port: '%s'\n", ptr1); */
+            _exit(1);
+        }
+
+        fprintf(stderr, "[PORT STRIP] Parsed host='%s', port=%d\n", buf, port);
+
+        snprintf(message, sizeof(message), "%d\n", port);
+        written = write(pipefd[1], message, strlen(message));
+        if (written == -1) {
+            perror("write failed (port)");
+            _exit(1);
+        }
+
+        written = write(pipefd[1], buf, strlen(buf));
+        if (written == -1) {
+            perror("write failed (host)");
+            _exit(1);
+        }
+
+        close(pipefd[1]);
+        _exit(0);
+    } else {
+        char readbuf[1060];
+        int status;
+        ssize_t n;
+        char *newline;
+
+        close(pipefd[1]);
+        waitpid(pid, &status, 0);
+
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+            return -1;
+
+        n = read(pipefd[0], readbuf, sizeof(readbuf) - 1);
+        close(pipefd[0]);
+
+        if (n <= 0)
+            return -1;
+
+        readbuf[n] = '\0';
+
+        newline = strchr(readbuf, '\n');
+        if (!newline)
+            return -1;
+
+        *newline = '\0';
+        if (sscanf(readbuf, "%d", port_out) != 1)
+            return -1;
+
+        strncpy(output_host, newline + 1, output_size - 1);
+        output_host[output_size - 1] = '\0';
+
+        return 0;
+    }
+}
+
 /*
  * Pull the information out of the URL line.
  * This expects urls with the initial '<proto>://'
@@ -285,13 +385,14 @@ static int strip_return_port (char *host)
  * (proxied) ftp:// urls and https-requests that
  * come in without the proto:// part via CONNECT.
  */
-static int extract_url (const char *url, int default_port,
+static int __attribute__((unused)) extract_url (const char *url, int default_port,
                         struct request_s *request)
 {
         char *p;
-        int port;
+        int parsed_port = 0; 
 
         char sanitized[1024];
+        char cleaned_host[1024];
 
         /* Full URL Passed */
         /* fprintf(stderr, "[DEBUG] Full URL passed in: %s\n", url);
@@ -331,8 +432,16 @@ static int extract_url (const char *url, int default_port,
         }
 
         /* Find a proper port in www.site.com:8001 URLs */
-        port = strip_return_port (request->host);
-        request->port = (port != 0) ? port : default_port;
+        /* port = strip_return_port (request->host);
+        request->port = (port != 0) ? port : default_port; */
+        if (sandbox_strip_return_port(request->host, cleaned_host, sizeof(cleaned_host), &parsed_port) == 0) {
+                safefree(request->host);
+                request->host = safestrdup(cleaned_host);
+                request->port = (parsed_port != 0) ? parsed_port : default_port;
+        } else {
+                fprintf(stderr, "[SANDBOX] Failed to extract port from host: '%s'. Using default port: %d\n", request->host, default_port);
+                request->port = default_port;
+        }
 
         /* Remove any surrounding '[' and ']' from IPv6 literals */
         p = strrchr (request->host, ']');
@@ -354,6 +463,144 @@ ERROR_EXIT:
 
         return -1;
 }
+
+/* url: The URL to parse (e.g "example.com:8080/path")*/
+/* default_port: fallback port if the URL doesnt specify one*/
+/* request: output structure to hold parsed results: host, path, port*/
+static int sandbox_extract_url(const char *url, int default_port, struct request_s *request) {
+    int pipefd[2];
+    pid_t pid;
+
+    if (pipe(pipefd) == -1)
+        return -1;
+
+    pid = fork();
+    if (pid < 0)
+        return -1;
+
+    if (pid == 0) {
+        char host[1024] = {0};
+        char path[1024] = {0};
+        char sanitized[1024] = {0};
+        char cleaned_host[1024] = {0};
+        char buf[2048] = {0};
+        char *p, *b;
+        int port = 0;
+        ssize_t written;
+
+        close(pipefd[0]);
+
+        fprintf(stderr, "[CHILD] Received URL: '%s'\n", url);
+        fflush(stderr);
+
+        if (!url || strlen(url) == 0) {
+            fprintf(stderr, "[CHILD] Invalid input: URL is NULL or empty\n");
+            fflush(stderr);
+            _exit(1);
+        }
+
+        p = strchr(url, '/');
+        if (p) {
+            int len = p - url;
+            if (len >= sizeof(host)) len = sizeof(host) - 1;
+            strncpy(host, url, len);
+            host[len] = '\0';
+
+            strncpy(path, p, sizeof(path) - 1);
+            path[sizeof(path) - 1] = '\0';
+        } else {
+            strncpy(host, url, sizeof(host) - 1);
+            host[sizeof(host) - 1] = '\0';
+
+            strcpy(path, "/");
+        }
+
+        /* fprintf(stderr, "[CHILD] Parsed host='%s', path='%s'\n", host, path); */
+        fflush(stderr);
+
+        if (sandbox_strip_username_password(host, sanitized, sizeof(sanitized)) != 0) {
+            fprintf(stderr, "[CHILD] Failed to strip username/password\n");
+            _exit(1);
+        }
+
+        strncpy(host, sanitized, sizeof(host) - 1);
+        host[sizeof(host) - 1] = '\0';
+        /*fprintf(stderr, "[CHILD] After user strip: host='%s'\n", host); */
+        fflush(stderr);
+
+        if (sandbox_strip_return_port(host, cleaned_host, sizeof(cleaned_host), &port) != 0) {
+            port = default_port;
+        }
+
+        strncpy(host, cleaned_host, sizeof(host) - 1);
+        host[sizeof(host) - 1] = '\0';
+        fprintf(stderr, "[CHILD] After port strip: host='%s', port=%d\n", host, port);
+        fflush(stderr);
+
+        b = strrchr(host, ']');
+        if (b && *host == '[') {
+            memmove(host, host + 1, strlen(host) - 2);
+            *(b - 1) = '\0';
+        }
+
+        snprintf(buf, sizeof(buf), "%d\n%s\n%s\n", port, host, path);
+        written = write(pipefd[1], buf, strlen(buf));
+        if (written == -1) {
+            perror("[CHILD] write failed (final output)");
+            _exit(1);
+        }
+
+        close(pipefd[1]);
+        _exit(0);
+
+    } else {
+
+        char readbuf[2048] = {0};
+        ssize_t n;
+        int status;
+        char *line1, *line2, *line3;
+
+        int parsed_port;
+
+        close(pipefd[1]);
+        waitpid(pid, &status, 0);
+
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "[PARENT] Child failed: exit status = %d\n", WEXITSTATUS(status));
+            return -1;
+        }
+
+        n = read(pipefd[0], readbuf, sizeof(readbuf) - 1);
+        close(pipefd[0]);
+
+        if (n <= 0) {
+            perror("[PARENT] read failed or got empty");
+            return -1;
+        }
+
+        readbuf[n] = '\0';
+
+        line1 = strtok(readbuf, "\n");
+        line2 = strtok(NULL, "\n");
+        line3 = strtok(NULL, "\n");
+
+        if (!line1 || !line2 || !line3) {
+            fprintf(stderr, "[PARENT] Failed to parse URL result: line1='%s' line2='%s' line3='%s'\n",
+                    line1 ? line1 : "NULL",
+                    line2 ? line2 : "NULL",
+                    line3 ? line3 : "NULL");
+            return -1;
+        }
+        
+        parsed_port = atoi(line1);
+        request->port = (parsed_port == 0) ? default_port : parsed_port;
+        request->host = safestrdup(line2);
+        request->path = safestrdup(line3);
+
+        return (request->host && request->path) ? 0 : -1;
+    }
+}
+
 
 /*
  * Create a connection for HTTP connections.
@@ -527,14 +774,14 @@ BAD_REQUEST_ERROR:
         {
                 char *skipped_type = strstr (url, "//") + 2;
 
-                if (extract_url (skipped_type, HTTP_PORT, request) < 0) {
+                if (sandbox_extract_url (skipped_type, HTTP_PORT, request) < 0) {
                         indicate_http_error (connptr, 400, "Bad Request",
                                              "detail", "Could not parse URL",
                                              "url", url, NULL);
                         goto fail;
                 }
         } else if (strcmp (request->method, "CONNECT") == 0) {
-                if (extract_url (url, HTTP_PORT_SSL, request) < 0) {
+                if (sandbox_extract_url (url, HTTP_PORT_SSL, request) < 0) {
                         indicate_http_error (connptr, 400, "Bad Request",
                                              "detail", "Could not parse URL",
                                              "url", url, NULL);
