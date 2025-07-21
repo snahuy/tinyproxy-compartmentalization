@@ -95,3 +95,68 @@ int basicauth_check (sblist *authlist, const char *authstring)
         }
 	return 0;
 }
+
+int sandbox_basicauth_check(sblist *authlist, const char *authstring)
+{
+    int pipefd[2];
+    pid_t pid;
+
+    fprintf(stderr, "[PARENT] Called sandbox_basicauth_check with authstring: %s\n", authstring);
+    fflush(stderr);
+
+    if (pipe(pipefd) == -1)
+        return -1;
+
+    pid = fork();
+    if (pid < 0)
+        return -1;
+
+    if (pid == 0) {
+        /* Child process */ 
+        close(pipefd[0]); 
+
+        fprintf(stderr, "[CHILD] Checking authstring in sandbox...\n");
+        fflush(stderr);
+
+        int match = basicauth_check(authlist, authstring);
+
+        if (match == 1) {
+            fprintf(stderr, "[CHILD] Auth matched!\n");
+        } else {
+            fprintf(stderr, "[CHILD] Auth failed!\n");
+        }
+        fflush(stderr);
+
+        char result = (match == 1) ? '1' : '0';
+        if (write(pipefd[1], &result, 1) != 1) {
+            perror("[CHILD] write failed");
+            close(pipefd[1]);
+            _exit(1);
+        }
+
+        close(pipefd[1]);
+        _exit(0);
+    } else {
+        /* Parent Process */
+        close(pipefd[1]);  
+
+        char result;
+        int status;
+
+        waitpid(pid, &status, 0);
+
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0)
+            return -1;
+
+        if (read(pipefd[0], &result, 1) != 1) {
+            fprintf(stderr, "[SANDBOX] Parent: failed to read from pipe\n");
+            close(pipefd[0]);
+            return -1;
+        }
+
+        close(pipefd[0]);
+
+        return (result == '1') ? 1 : 0;
+    }
+}
+

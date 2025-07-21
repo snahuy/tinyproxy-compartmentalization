@@ -32,4 +32,5 @@ extern void basicauth_add (sblist *authlist,
 
 extern int basicauth_check (sblist *authlist, const char *authstring);
 
+extern int sandbox_basicauth_check(sblist *authlist, const char *authstring);
 #endif

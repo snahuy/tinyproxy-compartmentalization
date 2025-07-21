@@ -473,32 +473,37 @@ static int sandbox_extract_url(const char *url, int default_port, struct request
 
     if (pipe(pipefd) == -1)
         return -1;
-
+    
+    /*Creates a child process*/
     pid = fork();
+    /*If forks fail return error */
     if (pid < 0)
         return -1;
-
+    
+    /* Child Process */
     if (pid == 0) {
-        char host[1024] = {0};
-        char path[1024] = {0};
-        char sanitized[1024] = {0};
-        char cleaned_host[1024] = {0};
-        char buf[2048] = {0};
-        char *p, *b;
-        int port = 0;
-        ssize_t written;
+        char host[1024] = {0}; /* Holds the extracted host part of the URL */
+        char path[1024] = {0}; /* Holds the extracted path (/path)*/
+        char sanitized[1024] = {0}; /* Holds the host after stripping username/password */
+        char cleaned_host[1024] = {0}; /* Holds the Host after removing the port */
+        char buf[2048] = {0}; /* Output buffer that will be sent to the parent */
+        char *p, *b; /* Temporary pointers used in strig parsing */
+        int port = 0; /* The extracted port number */
+        ssize_t written; /* Return value from write() */
 
         close(pipefd[0]);
 
         fprintf(stderr, "[CHILD] Received URL: '%s'\n", url);
         fflush(stderr);
 
+        /* If URL is empty or null, exit early with failure */
         if (!url || strlen(url) == 0) {
             fprintf(stderr, "[CHILD] Invalid input: URL is NULL or empty\n");
             fflush(stderr);
             _exit(1);
         }
 
+        /* Extract host and path */
         p = strchr(url, '/');
         if (p) {
             int len = p - url;
@@ -518,25 +523,28 @@ static int sandbox_extract_url(const char *url, int default_port, struct request
         /* fprintf(stderr, "[CHILD] Parsed host='%s', path='%s'\n", host, path); */
         fflush(stderr);
 
+        /* Strip username/password from host */
         if (sandbox_strip_username_password(host, sanitized, sizeof(sanitized)) != 0) {
             fprintf(stderr, "[CHILD] Failed to strip username/password\n");
             _exit(1);
         }
 
+        /* Store reuslt in Sanitize*/
         strncpy(host, sanitized, sizeof(host) - 1);
         host[sizeof(host) - 1] = '\0';
         /*fprintf(stderr, "[CHILD] After user strip: host='%s'\n", host); */
         fflush(stderr);
 
+        /* Remove port numbr and extract it */
         if (sandbox_strip_return_port(host, cleaned_host, sizeof(cleaned_host), &port) != 0) {
             port = default_port;
         }
-
         strncpy(host, cleaned_host, sizeof(host) - 1);
         host[sizeof(host) - 1] = '\0';
         fprintf(stderr, "[CHILD] After port strip: host='%s', port=%d\n", host, port);
         fflush(stderr);
 
+        /* Normalize IPv6 address */
         b = strrchr(host, ']');
         if (b && *host == '[') {
             memmove(host, host + 1, strlen(host) - 2);
@@ -554,22 +562,22 @@ static int sandbox_extract_url(const char *url, int default_port, struct request
         _exit(0);
 
     } else {
-
-        char readbuf[2048] = {0};
-        ssize_t n;
-        int status;
-        char *line1, *line2, *line3;
-
-        int parsed_port;
+        char readbuf[2048] = {0}; /* Buffer to read child output */
+        ssize_t n; /* Number of bytes read */
+        int status; /* Child's exit status */
+        char *line1, *line2, *line3; /* Extracted line from buffer */
+        int parsed_port; /* Port from child output */
 
         close(pipefd[1]);
-        waitpid(pid, &status, 0);
+        waitpid(pid, &status, 0); /* Wait for child to finish */
 
+        /* Check child exited normally and returned 0 */
         if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
             fprintf(stderr, "[PARENT] Child failed: exit status = %d\n", WEXITSTATUS(status));
             return -1;
         }
 
+        /* Read the 3-line output from child */
         n = read(pipefd[0], readbuf, sizeof(readbuf) - 1);
         close(pipefd[0]);
 
@@ -592,11 +600,13 @@ static int sandbox_extract_url(const char *url, int default_port, struct request
             return -1;
         }
         
+        /* Store in Request Structure */
         parsed_port = atoi(line1);
         request->port = (parsed_port == 0) ? default_port : parsed_port;
         request->host = safestrdup(line2);
         request->path = safestrdup(line3);
 
+        /* Return 0 on success, -1 on error */
         return (request->host && request->path) ? 0 : -1;
     }
 }
@@ -605,7 +615,7 @@ static int sandbox_extract_url(const char *url, int default_port, struct request
 /*
  * Create a connection for HTTP connections.
  */
-static int
+static int __attribute__((unused))
 establish_http_connection (struct conn_s *connptr, struct request_s *request)
 {
         char portbuff[7];
@@ -651,6 +661,108 @@ establish_http_connection (struct conn_s *connptr, struct request_s *request)
                                                connptr->protocol.minor,
                                       request->host, portbuff);
         }
+}
+
+static int sandbox_establish_http_connection(struct conn_s *connptr, struct request_s *request)
+{
+    int pipefd[2];
+    pid_t pid;
+
+    if (pipe(pipefd) == -1)
+        return -1;
+
+    pid = fork();
+    if (pid < 0)
+        return -1;
+
+    if (pid == 0) {
+        char msg[2048];  
+        char portbuff[7] = "";
+        char dst[sizeof(struct in6_addr)];
+        int len = 0;
+
+        fprintf(stderr, "[SANDBOX] Child: Host = %s, Method = %s, Path = %s, Port = %d\n",
+            request->host, request->method, request->path, request->port);
+        fflush(stderr);
+        /* Child process: format the HTTP request */
+        close(pipefd[0]);
+
+        
+
+        if (request->port != HTTP_PORT && request->port != HTTP_PORT_SSL)
+            snprintf(portbuff, sizeof(portbuff), ":%u", request->port);
+
+       
+        if (inet_pton(AF_INET6, request->host, dst) > 0) {
+            len = snprintf(msg, sizeof(msg),
+                           "%s %s HTTP/1.%u\r\n"
+                           "Host: [%s]%s\r\n"
+                           "Connection: close\r\n",
+                           request->method, request->path,
+                           connptr->protocol.major != 1 ? 0 : connptr->protocol.minor,
+                           request->host, portbuff);
+        } else if (connptr->upstream_proxy &&
+                   connptr->upstream_proxy->type == PT_HTTP &&
+                   connptr->upstream_proxy->ua.authstr) {
+            len = snprintf(msg, sizeof(msg),
+                           "%s %s HTTP/1.%u\r\n"
+                           "Host: %s%s\r\n"
+                           "Connection: close\r\n"
+                           "Proxy-Authorization: Basic %s\r\n",
+                           request->method, request->path,
+                           connptr->protocol.major != 1 ? 0 : connptr->protocol.minor,
+                           request->host, portbuff,
+                           connptr->upstream_proxy->ua.authstr);
+        } else {
+            len = snprintf(msg, sizeof(msg),
+                           "%s %s HTTP/1.%u\r\n"
+                           "Host: %s%s\r\n"
+                           "Connection: close\r\n",
+                           request->method, request->path,
+                           connptr->protocol.major != 1 ? 0 : connptr->protocol.minor,
+                           request->host, portbuff);
+        }
+
+        if (len < 0 || len >= (int)sizeof(msg)) {
+            _exit(1);  
+        }
+
+        fprintf(stderr, "[SANDBOX] Child: writing request string to pipe...\n");
+        fflush(stderr);
+        write(pipefd[1], msg, len);
+        close(pipefd[1]);
+        _exit(0);
+    } else {
+        char buf[2048];
+        int status;
+        ssize_t n;
+        /* Parent process: write to server_fd */
+        close(pipefd[1]);
+
+        
+        n = read(pipefd[0], buf, sizeof(buf));
+        if (n <= 0) {
+                fprintf(stderr, "[SANDBOX] Parent: failed to read from pipe\n");
+                fflush(stderr);
+                close(pipefd[0]);
+                return -1;
+        }
+        buf[n] = '\0';
+        fprintf(stderr, "[SANDBOX] Parent: received HTTP request:\n%s\n", buf);
+        fflush(stderr);
+        close(pipefd[0]);
+
+        fprintf(stderr, "[SANDBOX] Parent: child exited with %d\n", WEXITSTATUS(status));
+        fflush(stderr);
+        waitpid(pid, &status, 0);
+
+        if (n <= 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+            return -1;
+
+        fprintf(stderr, "[SANDBOX] Parent: read %zd bytes: %s\n", n, buf);
+        fflush(stderr);
+        return write(connptr->server_fd, buf, n);
+    }
 }
 
 /*
@@ -1749,7 +1861,7 @@ connect_to_upstream_proxy(struct conn_s *connptr, struct request_s *request)
 	if (connptr->connect_method)
 		return 0;
 
-	return establish_http_connection(connptr, request);
+	return sandbox_establish_http_connection(connptr, request);
 }
 #endif
 
@@ -1834,7 +1946,7 @@ connect_to_upstream (struct conn_s *connptr, struct request_s *request)
                 safefree (request->path);
         request->path = combined_string;
 
-        return establish_http_connection (connptr, request);
+        return sandbox_establish_http_connection (connptr, request);
 #endif
 }
 
@@ -2044,7 +2156,7 @@ void handle_connection (struct conn_s *connptr, union sockaddr_union* addr)
                 if ( /* currently only "basic" auth supported */
                         (strncmp(authstring, "Basic ", 6) == 0 ||
                          strncmp(authstring, "basic ", 6) == 0) &&
-                        basicauth_check (config->basicauth_list, authstring + 6) == 1)
+                        sandbox_basicauth_check (config->basicauth_list, authstring + 6) == 1)
                                 failure = 0;
                 if(failure) {
                         auth_error(connptr, stathost_connect ? 401 : 407);
@@ -2095,7 +2207,7 @@ void handle_connection (struct conn_s *connptr, union sockaddr_union* addr)
                              connptr->server_fd);
 
                 if (!connptr->connect_method)
-                        establish_http_connection (connptr, request);
+                        sandbox_establish_http_connection (connptr, request);
         }
 
         if (process_client_headers (connptr, hashofheaders) < 0) {
