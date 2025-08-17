@@ -304,15 +304,17 @@ static int sandbox_strip_return_port(char *input, char *output_host, size_t outp
         strncpy(buf, input, sizeof(buf) - 1);
         buf[sizeof(buf) - 1] = '\0';
 
-        ptr2 = strchr(buf, ']');
-        if (ptr2 != NULL) {
-            /*fprintf(stderr, "[PORT STRIP] IPv6 address not supported: '%s'\n", buf); */
-            _exit(1);
-        }
-
         ptr1 = strrchr(buf, ':');
         if (ptr1 == NULL) {
-            /* fprintf(stderr, "[PORT STRIP] No port in input. Returning host='%s'\n", buf); */
+            snprintf(message, sizeof(message), "%d\n", 0);
+            write(pipefd[1], message, strlen(message));
+            write(pipefd[1], buf, strlen(buf));
+            close(pipefd[1]);
+            _exit(0);
+        }
+
+        ptr2 = strchr(ptr1, ']');
+        if (ptr2 != NULL) {
             snprintf(message, sizeof(message), "%d\n", 0);
             write(pipefd[1], message, strlen(message));
             write(pipefd[1], buf, strlen(buf));
@@ -321,25 +323,17 @@ static int sandbox_strip_return_port(char *input, char *output_host, size_t outp
         }
 
         *ptr1++ = '\0'; 
-        if (sscanf(ptr1, "%d", &port) != 1) {
-            /* fprintf(stderr, "[PORT STRIP] Invalid port: '%s'\n", ptr1); */
+        if (sscanf(ptr1, "%d", &port) != 1)
             _exit(1);
-        }
-
-        fprintf(stderr, "[PORT STRIP] Parsed host='%s', port=%d\n", buf, port);
 
         snprintf(message, sizeof(message), "%d\n", port);
         written = write(pipefd[1], message, strlen(message));
-        if (written == -1) {
-            perror("write failed (port)");
+        if (written == -1)
             _exit(1);
-        }
 
         written = write(pipefd[1], buf, strlen(buf));
-        if (written == -1) {
-            perror("write failed (host)");
+        if (written == -1)
             _exit(1);
-        }
 
         close(pipefd[1]);
         _exit(0);
@@ -377,6 +371,7 @@ static int sandbox_strip_return_port(char *input, char *output_host, size_t outp
         return 0;
     }
 }
+
 
 /*
  * Pull the information out of the URL line.
@@ -473,32 +468,37 @@ static int sandbox_extract_url(const char *url, int default_port, struct request
 
     if (pipe(pipefd) == -1)
         return -1;
-
+    
+    /*Creates a child process*/
     pid = fork();
+    /*If forks fail return error */
     if (pid < 0)
         return -1;
-
+    
+    /* Child Process */
     if (pid == 0) {
-        char host[1024] = {0};
-        char path[1024] = {0};
-        char sanitized[1024] = {0};
-        char cleaned_host[1024] = {0};
-        char buf[2048] = {0};
-        char *p, *b;
-        int port = 0;
-        ssize_t written;
+        char host[1024] = {0}; /* Holds the extracted host part of the URL */
+        char path[1024] = {0}; /* Holds the extracted path (/path)*/
+        char sanitized[1024] = {0}; /* Holds the host after stripping username/password */
+        char cleaned_host[1024] = {0}; /* Holds the Host after removing the port */
+        char buf[2048] = {0}; /* Output buffer that will be sent to the parent */
+        char *p, *b; /* Temporary pointers used in strig parsing */
+        int port = 0; /* The extracted port number */
+        ssize_t written; /* Return value from write() */
 
         close(pipefd[0]);
 
-        fprintf(stderr, "[CHILD] Received URL: '%s'\n", url);
+        fprintf(stderr, "[CHILD] Starting URL parse for: '%s'\n", url);
         fflush(stderr);
 
+        /* If URL is empty or null, exit early with failure */
         if (!url || strlen(url) == 0) {
             fprintf(stderr, "[CHILD] Invalid input: URL is NULL or empty\n");
             fflush(stderr);
             _exit(1);
         }
 
+        /* Extract host and path */
         p = strchr(url, '/');
         if (p) {
             int len = p - url;
@@ -515,28 +515,31 @@ static int sandbox_extract_url(const char *url, int default_port, struct request
             strcpy(path, "/");
         }
 
-        /* fprintf(stderr, "[CHILD] Parsed host='%s', path='%s'\n", host, path); */
+        fprintf(stderr, "[CHILD] Extracted host='%s', path='%s'\n", host, path);
         fflush(stderr);
 
+        /* Strip username/password from host */
         if (sandbox_strip_username_password(host, sanitized, sizeof(sanitized)) != 0) {
             fprintf(stderr, "[CHILD] Failed to strip username/password\n");
             _exit(1);
         }
 
+        /* Store reuslt in Sanitize*/
         strncpy(host, sanitized, sizeof(host) - 1);
         host[sizeof(host) - 1] = '\0';
-        /*fprintf(stderr, "[CHILD] After user strip: host='%s'\n", host); */
+        fprintf(stderr, "[CHILD] After user strip: host='%s'\n", host); 
         fflush(stderr);
 
+        /* Remove port numbr and extract it */
         if (sandbox_strip_return_port(host, cleaned_host, sizeof(cleaned_host), &port) != 0) {
             port = default_port;
         }
-
         strncpy(host, cleaned_host, sizeof(host) - 1);
         host[sizeof(host) - 1] = '\0';
-        fprintf(stderr, "[CHILD] After port strip: host='%s', port=%d\n", host, port);
+        fprintf(stderr, "[CHILD] Cleaned host='%s', port=%d\n", host, port);
         fflush(stderr);
 
+        /* Normalize IPv6 address */
         b = strrchr(host, ']');
         if (b && *host == '[') {
             memmove(host, host + 1, strlen(host) - 2);
@@ -549,32 +552,37 @@ static int sandbox_extract_url(const char *url, int default_port, struct request
             perror("[CHILD] write failed (final output)");
             _exit(1);
         }
+        
+        fprintf(stderr, "[CHILD] Wrote %zd bytes to pipe:\n%s\n", written, buf);
+        fflush(stderr);
 
         close(pipefd[1]);
         _exit(0);
 
     } else {
-
-        char readbuf[2048] = {0};
-        ssize_t n;
-        int status;
-        char *line1, *line2, *line3;
-
-        int parsed_port;
+        char readbuf[2048] = {0}; /* Buffer to read child output */
+        ssize_t n; /* Number of bytes read */
+        int status; /* Child's exit status */
+        char *line1, *line2, *line3; /* Extracted line from buffer */
+        int parsed_port; /* Port from child output */
 
         close(pipefd[1]);
-        waitpid(pid, &status, 0);
-
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
-            fprintf(stderr, "[PARENT] Child failed: exit status = %d\n", WEXITSTATUS(status));
+        
+        n = read(pipefd[0], readbuf, sizeof(readbuf) - 1);
+        if (n <= 0) {
+            perror("[PARENT] read failed");
+            close(pipefd[0]);
+            waitpid(pid, &status, 0);
             return -1;
         }
 
-        n = read(pipefd[0], readbuf, sizeof(readbuf) - 1);
-        close(pipefd[0]);
+        readbuf[n] = '\0';  
+        fprintf(stderr, "[PARENT] Read %zd bytes from child:\n%s\n", n, readbuf);
+        fflush(stderr);
 
-        if (n <= 0) {
-            perror("[PARENT] read failed or got empty");
+        waitpid(pid, &status, 0);
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "[PARENT] Child process failed: exit status = %d\n", WEXITSTATUS(status));
             return -1;
         }
 
@@ -592,11 +600,17 @@ static int sandbox_extract_url(const char *url, int default_port, struct request
             return -1;
         }
         
+        /* Store in Request Structure */
         parsed_port = atoi(line1);
         request->port = (parsed_port == 0) ? default_port : parsed_port;
         request->host = safestrdup(line2);
         request->path = safestrdup(line3);
 
+        fprintf(stderr, "[PARENT] Parsed: port=%d, host='%s', path='%s'\n",
+                request->port, request->host, request->path);
+        fflush(stderr);
+
+        /* Return 0 on success, -1 on error */
         return (request->host && request->path) ? 0 : -1;
     }
 }
@@ -605,7 +619,7 @@ static int sandbox_extract_url(const char *url, int default_port, struct request
 /*
  * Create a connection for HTTP connections.
  */
-static int
+static int __attribute__((unused))
 establish_http_connection (struct conn_s *connptr, struct request_s *request)
 {
         char portbuff[7];
@@ -653,11 +667,118 @@ establish_http_connection (struct conn_s *connptr, struct request_s *request)
         }
 }
 
+static int sandbox_establish_http_connection(struct conn_s *connptr, struct request_s *request)
+{
+    int pipefd[2];
+    pid_t pid;
+
+    if (pipe(pipefd) == -1)
+        return -1;
+
+    pid = fork();
+    if (pid < 0)
+        return -1;
+
+    if (pid == 0) {
+        char msg[2048];  
+        char portbuff[7] = "";
+        char dst[sizeof(struct in6_addr)];
+        int len = 0;
+        ssize_t written;
+
+        fprintf(stderr, "[SANDBOX] Child: Host = %s, Method = %s, Path = %s, Port = %d\n",
+            request->host, request->method, request->path, request->port);
+        fflush(stderr);
+        /* Child process: format the HTTP request */
+        close(pipefd[0]);
+
+        
+
+        if (request->port != HTTP_PORT && request->port != HTTP_PORT_SSL)
+            snprintf(portbuff, sizeof(portbuff), ":%u", request->port);
+
+       
+        if (inet_pton(AF_INET6, request->host, dst) > 0) {
+            len = snprintf(msg, sizeof(msg),
+                           "%s %s HTTP/1.%u\r\n"
+                           "Host: [%s]%s\r\n"
+                           "Connection: close\r\n",
+                           request->method, request->path,
+                           connptr->protocol.major != 1 ? 0 : connptr->protocol.minor,
+                           request->host, portbuff);
+        } else if (connptr->upstream_proxy &&
+                   connptr->upstream_proxy->type == PT_HTTP &&
+                   connptr->upstream_proxy->ua.authstr) {
+            len = snprintf(msg, sizeof(msg),
+                           "%s %s HTTP/1.%u\r\n"
+                           "Host: %s%s\r\n"
+                           "Connection: close\r\n"
+                           "Proxy-Authorization: Basic %s\r\n",
+                           request->method, request->path,
+                           connptr->protocol.major != 1 ? 0 : connptr->protocol.minor,
+                           request->host, portbuff,
+                           connptr->upstream_proxy->ua.authstr);
+        } else {
+            len = snprintf(msg, sizeof(msg),
+                           "%s %s HTTP/1.%u\r\n"
+                           "Host: %s%s\r\n"
+                           "Connection: close\r\n",
+                           request->method, request->path,
+                           connptr->protocol.major != 1 ? 0 : connptr->protocol.minor,
+                           request->host, portbuff);
+        }
+
+        if (len < 0 || len >= (int)sizeof(msg)) {
+            _exit(1);  
+        }
+
+        fprintf(stderr, "[SANDBOX] Child: writing request string to pipe...\n");
+        fflush(stderr);
+        written = write(pipefd[1], msg, len);
+        if (written == -1) {
+            perror("write failed");
+            _exit(1);
+        }
+        close(pipefd[1]);
+        _exit(0);
+    } else {
+        char buf[2048];
+        int status;
+        ssize_t n;
+        /* Parent process: write to server_fd */
+        close(pipefd[1]);
+
+        
+        n = read(pipefd[0], buf, sizeof(buf));
+        if (n <= 0) {
+                fprintf(stderr, "[SANDBOX] Parent: failed to read from pipe\n");
+                fflush(stderr);
+                close(pipefd[0]);
+                return -1;
+        }
+        buf[n] = '\0';
+        fprintf(stderr, "[SANDBOX] Parent: received HTTP request:\n%s\n", buf);
+        fflush(stderr);
+        close(pipefd[0]);
+
+        waitpid(pid, &status, 0);
+        fprintf(stderr, "[SANDBOX] Parent: child exited with %d\n", WEXITSTATUS(status));
+        fflush(stderr);
+
+        if (n <= 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+            return -1;
+
+        fprintf(stderr, "[SANDBOX] Parent: read %zd bytes: %s\n", n, buf);
+        fflush(stderr);
+        return write(connptr->server_fd, buf, n);
+    }
+}
+
 /*
  * Send the appropriate response to the client to establish a
  * connection via CONNECT method.
  */
-static int send_connect_method_response (struct conn_s *connptr)
+static int __attribute__((unused)) send_connect_method_response (struct conn_s *connptr)
 {
         return write_message (connptr->client_fd,
                               "HTTP/1.%u 200 Connection established\r\n"
@@ -665,6 +786,73 @@ static int send_connect_method_response (struct conn_s *connptr)
                               "\r\n", connptr->protocol.major != 1 ? 0 :
                                       connptr->protocol.minor);
 }
+
+static int sandbox_send_connect_method_response(struct conn_s *connptr)
+{
+    int pipefd[2];
+    pid_t pid;
+
+    if (pipe(pipefd) == -1) {
+        fprintf(stderr, "[SANDBOX] Parent: pipe() failed\n");
+        return -1;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "[SANDBOX] Parent: fork() failed\n");
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* Child process: generate response string */ 
+        close(pipefd[0]);
+
+        char response[256];
+        int len = snprintf(response, sizeof(response),
+                           "HTTP/1.%u 200 Connection established\r\n"
+                           "Proxy-agent: " PACKAGE "\r\n"
+                           "\r\n",
+                           connptr->protocol.major != 1 ? 0 :
+                           connptr->protocol.minor);
+        if (len < 0 || len >= (int)sizeof(response)) {
+            fprintf(stderr, "[SANDBOX] Child: snprintf failed or overflow\n");
+            _exit(1);
+        }
+
+        fprintf(stderr, "[SANDBOX] Child: sending CONNECT response:\n%s", response);
+        fflush(stderr);
+
+        if (write(pipefd[1], response, len) != len) {
+            perror("[SANDBOX] Child: write failed");
+            _exit(1);
+        }
+
+        close(pipefd[1]);
+        _exit(0);
+    } else {
+        /* Parent Process: Read response and write to client_fd */
+        close(pipefd[1]);
+
+        char buf[256];
+        ssize_t n = read(pipefd[0], buf, sizeof(buf));
+        close(pipefd[0]);
+
+        int status;
+        waitpid(pid, &status, 0);
+
+        if (n <= 0 || !WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "[SANDBOX] Parent: failed to receive valid response from child\n");
+            return -1;
+        }
+
+        buf[n] = '\0';
+        fprintf(stderr, "[SANDBOX] Parent: received CONNECT response (%zd bytes):\n%s", n, buf);
+        fflush(stderr);
+
+        return write_message(connptr->client_fd, "%.*s", (int)n, buf);
+    }
+}
+
 
 /*
  * Break the request line apart and figure out where to connect and
@@ -829,7 +1017,7 @@ BAD_REQUEST_ERROR:
          */
         if (config->filter) {
                 int fu = config->filter_opts & FILTER_OPT_URL;
-                ret = filter_run (fu ? url : request->host);
+                ret = sandbox_filter_run (fu ? url : request->host);
 
                 if (ret) {
                         update_stats (STAT_DENIED);
@@ -1551,7 +1739,7 @@ ERROR_EXIT:
  * tinyproxy oh so long ago...)
  *	- rjkaes
  */
-static void relay_connection (struct conn_s *connptr)
+static void __attribute__((unused)) relay_connection (struct conn_s *connptr)
 {
         int ret;
         ssize_t bytes_received;
@@ -1633,6 +1821,111 @@ static void relay_connection (struct conn_s *connptr)
 
         return;
 }
+
+static void sandbox_relay_connection(struct conn_s *connptr)
+{
+    fprintf(stderr, "[SANDBOX RELAY] Entered relay: client_fd=%d, server_fd=%d\n",
+            connptr->client_fd, connptr->server_fd);
+    fflush(stderr);
+
+    int pipefd[2];
+    if (pipe(pipefd) == -1) {
+        perror("[SANDBOX RELAY] Pipe creation failed");
+        return;
+    }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("[SANDBOX RELAY] Fork failed");
+        return;
+    }
+
+    if (pid == 0) {
+        close(pipefd[0]);
+        fprintf(stderr, "[SANDBOX RELAY] Child: Starting relay loop\n");
+        fflush(stderr);
+
+        int ret;
+        ssize_t bytes_received;
+
+        for (;;) {
+            pollfd_struct fds[2] = {0};
+            fds[0].fd = connptr->client_fd;
+            fds[1].fd = connptr->server_fd;
+
+            /* Set events based on buffer state */
+            if (buffer_size(connptr->sbuffer) > 0) fds[0].events |= MYPOLL_WRITE;
+            if (buffer_size(connptr->cbuffer) > 0) fds[1].events |= MYPOLL_WRITE;
+            if (buffer_size(connptr->sbuffer) < MAXBUFFSIZE) fds[1].events |= MYPOLL_READ;
+            if (buffer_size(connptr->cbuffer) < MAXBUFFSIZE) fds[0].events |= MYPOLL_READ;
+
+            /* fprintf(stderr, "[SANDBOX RELAY] Child: Polling...\n"); */
+            fflush(stderr);
+            ret = mypoll(fds, 2, config->idletimeout);
+
+            if (ret == 0) {
+                fprintf(stderr, "[SANDBOX RELAY] Idle timeout reached\n");
+                _exit(0);
+            } else if (ret < 0) {
+                perror("[SANDBOX RELAY] mypoll error");
+                _exit(1);
+            }
+
+            /* Read from server -> buffer */
+            if (fds[1].revents & MYPOLL_READ) {
+                /* fprintf(stderr, "[SANDBOX RELAY] Reading from server_fd\n"); */ 
+                bytes_received = read_buffer(connptr->server_fd, connptr->sbuffer);
+                if (bytes_received < 0) break;
+            }
+
+            /* Read from Client -> buffer */
+            if ((fds[0].revents & MYPOLL_READ)) {
+                /* fprintf(stderr, "[SANDBOX RELAY] Reading from client_fd\n"); */
+                if (read_buffer(connptr->client_fd, connptr->cbuffer) < 0) break;
+            }
+
+            /* Write Buffer -> Server */
+            if ((fds[1].revents & MYPOLL_WRITE)) {
+                /* fprintf(stderr, "[SANDBOX RELAY] Writing to server_fd\n"); */ 
+                if (write_buffer(connptr->server_fd, connptr->cbuffer) < 0) break;
+            }
+
+            /* Write Buffer -> Client */
+            if ((fds[0].revents & MYPOLL_WRITE)) {
+                /* fprintf(stderr, "[SANDBOX RELAY] Writing to client_fd\n"); */ 
+                if (write_buffer(connptr->client_fd, connptr->sbuffer) < 0) break;
+            }
+        }
+
+        fprintf(stderr, "[SANDBOX RELAY] Child: Relay loop finished, flushing buffers\n");
+
+        /* Flush Server -> Client Buffer*/
+        while (buffer_size(connptr->sbuffer) > 0) {
+            if (write_buffer(connptr->client_fd, connptr->sbuffer) < 0) break;
+        }
+        shutdown(connptr->client_fd, SHUT_WR);
+
+        while (buffer_size(connptr->cbuffer) > 0) {
+            if (write_buffer(connptr->server_fd, connptr->cbuffer) < 0) break;
+        }
+
+        fprintf(stderr, "[SANDBOX RELAY] Child: Exiting normally\n");
+        _exit(0);
+    } else {
+        close(pipefd[1]);
+        int status;
+        waitpid(pid, &status, 0);
+
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "[SANDBOX RELAY] Parent: Relay child exited with error\n");
+        } else {
+            fprintf(stderr, "[SANDBOX RELAY] Parent: Relay child finished successfully\n");
+        }
+        close(pipefd[0]);
+    }
+}
+
+
 
 #ifdef UPSTREAM_SUPPORT
 static int
@@ -1749,7 +2042,7 @@ connect_to_upstream_proxy(struct conn_s *connptr, struct request_s *request)
 	if (connptr->connect_method)
 		return 0;
 
-	return establish_http_connection(connptr, request);
+	return sandbox_establish_http_connection(connptr, request);
 }
 #endif
 
@@ -1834,7 +2127,7 @@ connect_to_upstream (struct conn_s *connptr, struct request_s *request)
                 safefree (request->path);
         request->path = combined_string;
 
-        return establish_http_connection (connptr, request);
+        return sandbox_establish_http_connection (connptr, request);
 #endif
 }
 
@@ -2044,7 +2337,7 @@ void handle_connection (struct conn_s *connptr, union sockaddr_union* addr)
                 if ( /* currently only "basic" auth supported */
                         (strncmp(authstring, "Basic ", 6) == 0 ||
                          strncmp(authstring, "basic ", 6) == 0) &&
-                        basicauth_check (config->basicauth_list, authstring + 6) == 1)
+                        sandbox_basicauth_check (config->basicauth_list, authstring + 6) == 1)
                                 failure = 0;
                 if(failure) {
                         auth_error(connptr, stathost_connect ? 401 : 407);
@@ -2095,7 +2388,7 @@ void handle_connection (struct conn_s *connptr, union sockaddr_union* addr)
                              connptr->server_fd);
 
                 if (!connptr->connect_method)
-                        establish_http_connection (connptr, request);
+                        sandbox_establish_http_connection (connptr, request);
         }
 
         if (process_client_headers (connptr, hashofheaders) < 0) {
@@ -2121,7 +2414,7 @@ void handle_connection (struct conn_s *connptr, union sockaddr_union* addr)
                         HC_FAIL();
                 }
         } else {
-                if (send_connect_method_response (connptr) < 0) {
+                if (sandbox_send_connect_method_response (connptr) < 0) {
                         log_message (LOG_ERR,
                                      "handle_connection: Could not send CONNECT"
                                      " method greeting to client.");
@@ -2130,7 +2423,7 @@ void handle_connection (struct conn_s *connptr, union sockaddr_union* addr)
                 }
         }
 
-        relay_connection (connptr);
+        sandbox_relay_connection (connptr);
 
         log_message (LOG_INFO,
                      "Closed connection between local client (fd:%d) "

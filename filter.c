@@ -33,6 +33,12 @@
 #include "conf.h"
 #include "sblist.h"
 
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <stdio.h>
+#include <string.h>
+
 #define FILTER_BUFFER_LEN (512)
 
 static int err;
@@ -205,3 +211,70 @@ COMMON_EXIT:
         else
                 return 1;
 }
+
+int sandbox_filter_run(const char *str)
+{
+    int pipefd[2];
+    pid_t pid;
+    char result;
+
+    if (pipe(pipefd) == -1) {
+        perror("[SANDBOX] pipe failed");
+        return -1;
+    }
+
+    pid = fork();
+    if (pid < 0) {
+        perror("[SANDBOX] fork failed");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        close(pipefd[0]); 
+
+        fprintf(stderr, "[SANDBOX] Child: checking filter for '%s'\n", str);
+
+        int decision = filter_run(str);
+        result = (decision == 1) ? '1' : '0';
+
+        if (write(pipefd[1], &result, 1) != 1) {
+            perror("[SANDBOX] Child: write failed");
+            close(pipefd[1]);
+            _exit(1);
+        }
+
+        close(pipefd[1]);
+        _exit(0);
+    } else {
+        
+        close(pipefd[1]); 
+
+        int status;
+        if (waitpid(pid, &status, 0) == -1) {
+            perror("[SANDBOX] waitpid failed");
+            close(pipefd[0]);
+            return -1;
+        }
+
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+            fprintf(stderr, "[SANDBOX] Child exited abnormally\n");
+            close(pipefd[0]);
+            return -1;
+        }
+
+        if (read(pipefd[0], &result, 1) != 1) {
+            perror("[SANDBOX] Parent: read failed");
+            close(pipefd[0]);
+            return -1;
+        }
+
+        close(pipefd[0]);
+
+        fprintf(stderr, "[SANDBOX] Parent: filter decision = %c\n", result);
+
+        return (result == '1') ? 1 : 0;
+    }
+}
+

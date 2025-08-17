@@ -38,5 +38,6 @@ extern void filter_init (void);
 extern void filter_destroy (void);
 extern void filter_reload (void);
 extern int filter_run (const char *str);
+extern int sandbox_filter_run(const char *str);
 
 #endif
