@@ -619,7 +619,7 @@ static int sandbox_extract_url(const char *url, int default_port, struct request
 /*
  * Create a connection for HTTP connections.
  */
-static int 
+static int __attribute__((unused))
 establish_http_connection (struct conn_s *connptr, struct request_s *request)
 {
         char portbuff[7];
@@ -667,7 +667,7 @@ establish_http_connection (struct conn_s *connptr, struct request_s *request)
         }
 }
 
-static int __attribute__((unused)) sandbox_establish_http_connection(struct conn_s *connptr, struct request_s *request)
+static int sandbox_establish_http_connection(struct conn_s *connptr, struct request_s *request)
 {
     int pipefd[2];
     pid_t pid;
@@ -778,7 +778,7 @@ static int __attribute__((unused)) sandbox_establish_http_connection(struct conn
  * Send the appropriate response to the client to establish a
  * connection via CONNECT method.
  */
-static int send_connect_method_response (struct conn_s *connptr)
+static int __attribute__((unused)) send_connect_method_response (struct conn_s *connptr)
 {
         return write_message (connptr->client_fd,
                               "HTTP/1.%u 200 Connection established\r\n"
@@ -787,7 +787,7 @@ static int send_connect_method_response (struct conn_s *connptr)
                                       connptr->protocol.minor);
 }
 
-static int __attribute__((unused)) sandbox_send_connect_method_response(struct conn_s *connptr)
+static int sandbox_send_connect_method_response(struct conn_s *connptr)
 {
     int pipefd[2];
     pid_t pid;
@@ -2388,7 +2388,7 @@ void handle_connection (struct conn_s *connptr, union sockaddr_union* addr)
                              connptr->server_fd);
 
                 if (!connptr->connect_method)
-                        establish_http_connection (connptr, request);
+                        sandbox_establish_http_connection (connptr, request);
         }
 
         if (process_client_headers (connptr, hashofheaders) < 0) {
@@ -2414,7 +2414,7 @@ void handle_connection (struct conn_s *connptr, union sockaddr_union* addr)
                         HC_FAIL();
                 }
         } else {
-                if (send_connect_method_response (connptr) < 0) {
+                if (sandbox_send_connect_method_response (connptr) < 0) {
                         log_message (LOG_ERR,
                                      "handle_connection: Could not send CONNECT"
                                      " method greeting to client.");
